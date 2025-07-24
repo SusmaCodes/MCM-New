@@ -1,9 +1,292 @@
-// Add this to the end of your NotificationSettingsDialog.tsx file
-// Replace the existing export at the bottom
+import React, { useEffect, useState, createContext, useContext } from 'react';
+import { Button } from '@/components/ui/button';
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogTrigger
+} from '@/components/ui/dialog';
+import { Switch } from '@/components/ui/switch';
+import { Label } from '@/components/ui/label';
+import { Settings, Bell, Volume2, X, AlertCircle, CheckCircle, Info } from 'lucide-react';
+import { toast } from '@/components/ui/sonner';
+import { Badge } from '@/components/ui/badge';
 
-// Your existing NotificationSettingsDialog component (the one with the Dialog)
+// In-app notification types
+type NotificationType = 'info' | 'success' | 'warning' | 'error';
+
+interface InAppNotification {
+  id: string;
+  type: NotificationType;
+  title: string;
+  message: string;
+  timestamp: Date;
+  persistent?: boolean;
+  autoClose?: number;
+}
+
+// Context for managing in-app notifications
+const NotificationContext = createContext<{
+  notifications: InAppNotification[];
+  addNotification: (notification: Omit<InAppNotification, 'id' | 'timestamp'>) => void;
+  removeNotification: (id: string) => void;
+  clearAll: () => void;
+  inAppEnabled: boolean;
+  setInAppEnabled: (enabled: boolean) => void;
+}>({
+  notifications: [],
+  addNotification: () => {},
+  removeNotification: () => {},
+  clearAll: () => {},
+  inAppEnabled: true,
+  setInAppEnabled: () => {}
+});
+
+// In-app notification provider
+export const NotificationProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
+  const [notifications, setNotifications] = useState<InAppNotification[]>([]);
+  const [inAppEnabled, setInAppEnabled] = useState(true);
+
+  const addNotification = (notification: Omit<InAppNotification, 'id' | 'timestamp'>) => {
+    if (!inAppEnabled) return;
+
+    const newNotification: InAppNotification = {
+      ...notification,
+      id: Math.random().toString(36).substr(2, 9),
+      timestamp: new Date()
+    };
+
+    setNotifications(prev => [newNotification, ...prev]);
+
+    // Auto-remove if specified
+    if (notification.autoClose && !notification.persistent) {
+      setTimeout(() => {
+        removeNotification(newNotification.id);
+      }, notification.autoClose);
+    }
+  };
+
+  const removeNotification = (id: string) => {
+    setNotifications(prev => prev.filter(n => n.id !== id));
+  };
+
+  const clearAll = () => {
+    setNotifications([]);
+  };
+
+  return (
+    <NotificationContext.Provider value={{
+      notifications,
+      addNotification,
+      removeNotification,
+      clearAll,
+      inAppEnabled,
+      setInAppEnabled
+    }}>
+      {children}
+      <InAppNotificationContainer />
+    </NotificationContext.Provider>
+  );
+};
+
+// Hook to use notifications
+export const useNotifications = () => {
+  const context = useContext(NotificationContext);
+  if (!context) {
+    throw new Error('useNotifications must be used within NotificationProvider');
+  }
+  return context;
+};
+
+// Individual notification component
+const NotificationItem: React.FC<{ notification: InAppNotification }> = ({ notification }) => {
+  const { removeNotification } = useNotifications();
+
+  const getIcon = () => {
+    switch (notification.type) {
+      case 'success': return <CheckCircle className="h-5 w-5 text-green-600" />;
+      case 'error': return <AlertCircle className="h-5 w-5 text-red-600" />;
+      case 'warning': return <AlertCircle className="h-5 w-5 text-yellow-600" />;
+      default: return <Info className="h-5 w-5 text-blue-600" />;
+    }
+  };
+
+  const getBgColor = () => {
+    switch (notification.type) {
+      case 'success': return 'bg-green-50 border-green-200';
+      case 'error': return 'bg-red-50 border-red-200';
+      case 'warning': return 'bg-yellow-50 border-yellow-200';
+      default: return 'bg-blue-50 border-blue-200';
+    }
+  };
+
+  return (
+    <div className={`p-4 rounded-lg border ${getBgColor()} shadow-sm animate-in slide-in-from-right-full`}>
+      <div className="flex items-start justify-between">
+        <div className="flex items-start space-x-3">
+          {getIcon()}
+          <div className="flex-1">
+            <h4 className="font-medium text-gray-900">{notification.title}</h4>
+            <p className="text-sm text-gray-700 mt-1">{notification.message}</p>
+            <p className="text-xs text-gray-500 mt-2">
+              {notification.timestamp.toLocaleTimeString()}
+            </p>
+          </div>
+        </div>
+        <Button
+          variant="ghost"
+          size="sm"
+          onClick={() => removeNotification(notification.id)}
+          className="h-6 w-6 p-0"
+        >
+          <X className="h-4 w-4" />
+        </Button>
+      </div>
+    </div>
+  );
+};
+
+// Container for all in-app notifications
+const InAppNotificationContainer: React.FC = () => {
+  const { notifications, clearAll } = useNotifications();
+
+  if (notifications.length === 0) return null;
+
+  return (
+    <div className="fixed top-4 right-4 z-50 space-y-3 max-w-md">
+      {notifications.length > 3 && (
+        <div className="text-center">
+          <Button variant="outline" size="sm" onClick={clearAll}>
+            Clear All ({notifications.length})
+          </Button>
+        </div>
+      )}
+      {notifications.slice(0, 5).map(notification => (
+        <NotificationItem key={notification.id} notification={notification} />
+      ))}
+    </div>
+  );
+};
+
+// Helper function to send messages to the Service Worker
+const sendNotificationToServiceWorker = async (notificationData: {
+  type: string;
+  title: string;
+  body: string;
+  icon?: string;
+  badge?: string;
+  tag?: string;
+  requireInteraction?: boolean;
+  silent?: boolean;
+  vibrate?: number[];
+  actions?: { action: string; title: string; icon?: string }[];
+  data?: any;
+}) => {
+  if ('serviceWorker' in navigator && navigator.serviceWorker.controller) {
+    return new Promise((resolve, reject) => {
+      const messageChannel = new MessageChannel();
+      messageChannel.port1.onmessage = (event) => {
+        if (event.data.success) {
+          resolve(event.data);
+        } else {
+          reject(new Error(event.data.error || 'Failed to show notification via SW.'));
+        }
+      };
+      navigator.serviceWorker.controller.postMessage(
+        notificationData,
+        [messageChannel.port2]
+      );
+    });
+  } else {
+    // Only use Notification API on desktop, NOT mobile/PWA/standalone
+    const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
+    const isStandalone = window.matchMedia('(display-mode: standalone)').matches;
+    if (
+      'Notification' in window &&
+      Notification.permission === 'granted' &&
+      !isMobile &&
+      !isStandalone
+    ) {
+      try {
+        new Notification(notificationData.title, {
+          body: notificationData.body,
+          icon: notificationData.icon,
+          tag: notificationData.tag,
+          requireInteraction: notificationData.requireInteraction,
+          silent: notificationData.silent,
+          vibrate: notificationData.vibrate,
+          actions: notificationData.actions,
+          data: notificationData.data,
+        });
+        return Promise.resolve({ success: true, message: "Displayed non-persistent notification." });
+      } catch (error) {
+        toast.error("Unable to display notification. Please enable notifications in your browser settings.");
+        return Promise.reject(error);
+      }
+    } else {
+      toast.info("Notifications may not work in the background on your device. Please ensure Service Worker is active or use a supported browser.");
+      return Promise.resolve({ success: false, message: "Used fallback notification." });
+    }
+  }
+};
+
+// Enhanced notification service
+export class NotificationService {
+  private static addInAppNotification: ((notification: Omit<InAppNotification, 'id' | 'timestamp'>) => void) | null = null;
+
+  static setInAppNotifier(fn: (notification: Omit<InAppNotification, 'id' | 'timestamp'>) => void) {
+    this.addInAppNotification = fn;
+  }
+
+  // Send both browser and in-app notifications
+  static async sendDualNotification(options: {
+    title: string;
+    message: string;
+    type?: NotificationType;
+    browserOptions?: {
+      icon?: string;
+      tag?: string;
+      requireInteraction?: boolean;
+      silent?: boolean;
+      data?: any;
+    };
+    inAppOptions?: {
+      persistent?: boolean;
+      autoClose?: number;
+    };
+  }) {
+    const { title, message, type = 'info', browserOptions = {}, inAppOptions = {} } = options;
+
+    // Always show in-app notification first
+    if (this.addInAppNotification) {
+      this.addInAppNotification({
+        title,
+        message,
+        type,
+        ...inAppOptions
+      });
+    }
+
+    // Try browser notification if permission granted
+    if ('Notification' in window && Notification.permission === 'granted') {
+      try {
+        await sendNotificationToServiceWorker({
+          type: 'SHOW_NOTIFICATION',
+          title,
+          body: message,
+          icon: '/mcm-logo-192.png',
+          ...browserOptions
+        });
+      } catch (error) {
+        console.warn('Browser notification failed, but in-app notification was shown:', error);
+      }
+    }
+  }
+}
+
+// The main notification settings dialog component
 const NotificationSettingsDialog: React.FC = () => {
-  // ... your existing NotificationSettingsDialog code
   const [soundEnabled, setSoundEnabled] = useState(true);
   const [notificationsEnabled, setNotificationsEnabled] = useState(false);
   const [permission, setPermission] = useState<NotificationPermission>('default');
@@ -161,8 +444,6 @@ const NotificationSettingsDialog: React.FC = () => {
               id="notifications"
               checked={notificationsEnabled}
               onCheckedChange={handleNotificationToggle}
-              aria-checked={notificationsEnabled}
-              role="switch"
             />
           </div>
 
@@ -180,8 +461,6 @@ const NotificationSettingsDialog: React.FC = () => {
               id="inapp"
               checked={inAppEnabled}
               onCheckedChange={setInAppEnabled}
-              aria-checked={inAppEnabled}
-              role="switch"
             />
           </div>
 
@@ -199,8 +478,6 @@ const NotificationSettingsDialog: React.FC = () => {
               id="sound"
               checked={soundEnabled}
               onCheckedChange={setSoundEnabled}
-              aria-checked={soundEnabled}
-              role="switch"
             />
           </div>
 
@@ -209,14 +486,13 @@ const NotificationSettingsDialog: React.FC = () => {
               onClick={sendTestNotification}
               className="w-full"
               variant="outline"
-              aria-label="Send Test Notification"
             >
               🔔 Send Test Notification
             </Button>
           </div>
 
           {permission === 'denied' && (
-            <div className="p-3 bg-red-50 border border-red-200 rounded-lg" role="alert">
+            <div className="p-3 bg-red-50 border border-red-200 rounded-lg">
               <p className="text-sm text-red-800">
                 <strong>Notifications Blocked:</strong> Click the lock icon in your browser's
                 address bar and allow notifications, then refresh the page.
@@ -229,9 +505,6 @@ const NotificationSettingsDialog: React.FC = () => {
   );
 };
 
-// Export both named and default exports to support different import patterns
+// Export the dialog component as both named and default export
 export { NotificationSettingsDialog };
 export default NotificationSettingsDialog;
-
-// Keep your other exports
-export { NotificationProvider, useNotifications, NotificationService };
